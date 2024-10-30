@@ -7,24 +7,23 @@
 # https://github.com/microsoft/unilm/tree/master/beit
 
 import logging
-import torch
-import torchaudio
-import numpy as np
-import torch.nn as nn
-import torch.nn.functional as F
-
-from dataclasses import dataclass,field
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Optional
-from omegaconf import II, MISSING
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchaudio
+from omegaconf import II, MISSING, open_dict
+
 from fairseq import checkpoint_utils, tasks
-from omegaconf import open_dict
 from fairseq.dataclass import FairseqDataclass
 from fairseq.models import BaseFairseqModel, register_model
 from fairseq.tasks import FairseqTask
 
-from .mae import interpolate_pos_embed
-from .mae import get_2d_sincos_pos_embed_flexible
+from .mae import get_2d_sincos_pos_embed_flexible, interpolate_pos_embed
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +34,8 @@ class PredictionMode(Enum):
     CLS_TOKEN = auto()
     LIN_SOFTMAX = auto()
 
-# we follow the work of data2vec 2.0 on image modality and Audio-MAE in EAT 
+
+# we follow the work of data2vec 2.0 on image modality and Audio-MAE in EAT
 @dataclass
 class MaeImageClassificationConfig(FairseqDataclass):
     model_path: str = MISSING
@@ -77,17 +77,60 @@ class MaeImageClassificationConfig(FairseqDataclass):
     no_decay_blocks: bool = True
 
     # settings for specific downstream task
-    audio_mae: bool = field(default=False, metadata={"help": "if true, the task is to realize audio classification"})
-    esc50_eval: bool = field(default=False, metadata={"help": "if true, the task is to finetune model on esc50 dataset"})
-    spcv2_eval: bool = field(default=False, metadata={"help": "if true, the task is to finetune model on speech command v2 dataset"})
-    target_length: int = field(default=1024,metadata={"help": "This setting will pad the input sequence will zeros."})
+    audio_mae: bool = field(
+        default=False,
+        metadata={
+            "help": "if true, the task is to realize audio classification"
+        },
+    )
+    esc50_eval: bool = field(
+        default=False,
+        metadata={
+            "help": "if true, the task is to finetune model on esc50 dataset"
+        },
+    )
+    spcv2_eval: bool = field(
+        default=False,
+        metadata={
+            "help": "if true, the task is to finetune model on speech command v2 dataset"
+        },
+    )
+    yokogawa_eval: bool = field(
+        default=False,
+        metadata={
+            "help": "if true, the task is to finetune model on yokogawa dataset"
+        },
+    )
+    target_length: int = field(
+        default=1024,
+        metadata={
+            "help": "This setting will pad the input sequence will zeros."
+        },
+    )
 
     # specaug for specific downstream task
-    specaug: bool = field(default=False, metadata={"help": "if true, use the specaug technique (frame and frequency masked 30%)"})
-    freqm: int = field(default=25, metadata={"help": "the mask ratio of frequency dimension in audio spectrogram by default"})
-    timem: int = field(default=200, metadata={"help": "the mask ratio of time dimension in audio spectrogram by default"})
-    mask_ratio: float = field(default=0.0, metadata={"help": "the mask ratio of both time and freq "})
-    
+    specaug: bool = field(
+        default=False,
+        metadata={
+            "help": "if true, use the specaug technique (frame and frequency masked 30%)"
+        },
+    )
+    freqm: int = field(
+        default=25,
+        metadata={
+            "help": "the mask ratio of frequency dimension in audio spectrogram by default"
+        },
+    )
+    timem: int = field(
+        default=200,
+        metadata={
+            "help": "the mask ratio of time dimension in audio spectrogram by default"
+        },
+    )
+    mask_ratio: float = field(
+        default=0.0, metadata={"help": "the mask ratio of both time and freq "}
+    )
+
 
 def get_layer_id_for_vit(name, num_layers):
     """
@@ -106,7 +149,9 @@ def get_layer_id_for_vit(name, num_layers):
         return num_layers
 
 
-@register_model("mae_image_classification", dataclass=MaeImageClassificationConfig)
+@register_model(
+    "mae_image_classification", dataclass=MaeImageClassificationConfig
+)
 class MaeImageClassificationModel(BaseFairseqModel):
     def __init__(self, cfg: MaeImageClassificationConfig):
         super().__init__()
@@ -114,9 +159,10 @@ class MaeImageClassificationModel(BaseFairseqModel):
         self.audio_mae = self.cfg.audio_mae
         self.esc50_eval = self.cfg.esc50_eval
         self.spcv2_eval = self.cfg.spcv2_eval
+        self.yokogawa_eval = self.cfg.yokogawa_eval
         self.target_length = self.cfg.target_length
 
-        # adjust pre-training config into fine-tuning 
+        # adjust pre-training config into fine-tuning
         if cfg.pretrained_model_args is None:
             state = checkpoint_utils.load_checkpoint_to_cpu(cfg.model_path, {})
             pretrained_args = state.get("cfg", None)
@@ -144,7 +190,9 @@ class MaeImageClassificationModel(BaseFairseqModel):
             pretrained_args.task.image.data = cfg.data
 
         if "modalities" in pretrained_args.model:
-            prenet_blocks = pretrained_args.model["modalities"]["image"]["prenet_depth"]
+            prenet_blocks = pretrained_args.model["modalities"]["image"][
+                "prenet_depth"
+            ]
             model_blocks = pretrained_args.model["depth"]
             with open_dict(pretrained_args):
                 dpr = np.linspace(0, cfg.drop_path_rate, model_blocks).tolist()
@@ -154,11 +202,18 @@ class MaeImageClassificationModel(BaseFairseqModel):
                 pretrained_args.model["modalities"]["image"][
                     "end_drop_path_rate"
                 ] = max(0, dpr[prenet_blocks - 1])
-                pretrained_args.model["start_drop_path_rate"] = dpr[prenet_blocks]
+                pretrained_args.model["start_drop_path_rate"] = dpr[
+                    prenet_blocks
+                ]
                 pretrained_args.model["end_drop_path_rate"] = dpr[-1]
 
-                if "mae_masking" in pretrained_args.model["modalities"]["image"]:
-                    del pretrained_args.model["modalities"]["image"]["mae_masking"]
+                if (
+                    "mae_masking"
+                    in pretrained_args.model["modalities"]["image"]
+                ):
+                    del pretrained_args.model["modalities"]["image"][
+                        "mae_masking"
+                    ]
 
                 if cfg.remove_alibi:
                     pretrained_args.model["modalities"]["image"][
@@ -166,14 +221,21 @@ class MaeImageClassificationModel(BaseFairseqModel):
                     ] = False
                     if (
                         state is not None
-                        and "modality_encoders.IMAGE.alibi_bias" in state["model"]
+                        and "modality_encoders.IMAGE.alibi_bias"
+                        in state["model"]
                     ):
-                        del state["model"]["modality_encoders.IMAGE.alibi_bias"]
+                        del state["model"][
+                            "modality_encoders.IMAGE.alibi_bias"
+                        ]
 
                 pretrained_args.model["encoder_dropout"] = cfg.encoder_dropout
                 pretrained_args.model["post_mlp_drop"] = cfg.post_mlp_drop
-                pretrained_args.model["attention_dropout"] = cfg.attention_dropout
-                pretrained_args.model["activation_dropout"] = cfg.activation_dropout
+                pretrained_args.model["attention_dropout"] = (
+                    cfg.attention_dropout
+                )
+                pretrained_args.model["activation_dropout"] = (
+                    cfg.activation_dropout
+                )
                 pretrained_args.model["dropout_input"] = cfg.dropout_input
                 pretrained_args.model["layerdrop"] = cfg.layerdrop
 
@@ -183,15 +245,21 @@ class MaeImageClassificationModel(BaseFairseqModel):
                 pretrained_args.model["modalities"]["image"][
                     "prenet_dropout"
                 ] = cfg.prenet_dropout
-                
-                pretrained_args.model["modalities"]["image"]['target_length'] = cfg.target_length
+
+                pretrained_args.model["modalities"]["image"][
+                    "target_length"
+                ] = cfg.target_length
         else:
             # not d2v multi
             with open_dict(pretrained_args):
                 pretrained_args.model["drop_path_rate"] = cfg.drop_path_rate
                 pretrained_args.model["block_dropout"] = cfg.encoder_dropout
-                pretrained_args.model["attention_dropout"] = cfg.attention_dropout
-                pretrained_args.model["activation_dropout"] = cfg.activation_dropout
+                pretrained_args.model["attention_dropout"] = (
+                    cfg.attention_dropout
+                )
+                pretrained_args.model["activation_dropout"] = (
+                    cfg.activation_dropout
+                )
 
         task = tasks.setup_task(pretrained_args.task)
         model = task.build_model(pretrained_args.model, from_checkpoint=True)
@@ -201,24 +269,26 @@ class MaeImageClassificationModel(BaseFairseqModel):
 
         self.model = model
 
-        # adjust position embedding for specific downstream task (due to different fixed clip length) 
+        # adjust position embedding for specific downstream task (due to different fixed clip length)
         if state is not None and not cfg.no_pretrained_weights:
             interpolate_pos_embed(model, state)
 
-            if "modality_encoders.IMAGE.positional_encoder.pos_embed" in state["model"]:
+            if (
+                "modality_encoders.IMAGE.positional_encoder.pos_embed"
+                in state["model"]
+            ):
                 state["model"][
                     "modality_encoders.IMAGE.positional_encoder.positions"
                 ] = state["model"][
                     "modality_encoders.IMAGE.positional_encoder.pos_embed"
                 ]
-                
-                
+
                 del state["model"][
                     "modality_encoders.IMAGE.positional_encoder.pos_embed"
                 ]
             if "modality_encoders.IMAGE.encoder_mask" in state["model"]:
                 del state["model"]["modality_encoders.IMAGE.encoder_mask"]
-                
+
             # if cfg.esc50_eval:
             #     num_patches = 256
             #     embed_dim = 768
@@ -227,7 +297,7 @@ class MaeImageClassificationModel(BaseFairseqModel):
             #     pos_embed.data.copy_(torch.from_numpy(emb[:num_patches,:]).float().unsqueeze(0))
             #     state['model']["modality_encoders.IMAGE.fixed_positional_encoder.positions"] = pos_embed
             #     state['model']['_ema']["modality_encoders.IMAGE.fixed_positional_encoder.positions"] = pos_embed
-                
+
             # if cfg.spcv2_eval:
             #     num_patches = 64
             #     embed_dim = 768
@@ -236,9 +306,8 @@ class MaeImageClassificationModel(BaseFairseqModel):
             #     pos_embed.data.copy_(torch.from_numpy(emb[:num_patches,:]).float().unsqueeze(0))
             #     state['model']["modality_encoders.IMAGE.fixed_positional_encoder.positions"] = pos_embed
             #     state['model']['_ema']["modality_encoders.IMAGE.fixed_positional_encoder.positions"] = pos_embed
-                
 
-            model.load_state_dict(state["model"], strict=True) 
+            model.load_state_dict(state["model"], strict=True)
 
         if self.d2v_multi:
             model.remove_pretraining_modules(modality="image")
@@ -250,7 +319,9 @@ class MaeImageClassificationModel(BaseFairseqModel):
 
         self.fc_norm = None
         if self.cfg.use_fc_norm:
-            self.fc_norm = nn.LayerNorm(pretrained_args.model.embed_dim, eps=1e-6)
+            self.fc_norm = nn.LayerNorm(
+                pretrained_args.model.embed_dim, eps=1e-6
+            )
             nn.init.constant_(self.fc_norm.bias, 0)
             nn.init.constant_(self.fc_norm.weight, 1.0)
 
@@ -277,26 +348,30 @@ class MaeImageClassificationModel(BaseFairseqModel):
                 label_smoothing=cfg.label_smoothing,
                 num_classes=cfg.num_classes,
             )
-            
+
         # specaug for fine-tuning, you could set mask_ratio = 0 to setup specific freqm and timem
         if self.specaug:
             self.freqm = cfg.freqm
             self.timem = cfg.timem
-            
+
             if self.mask_ratio != 0.0:
                 self.freqm = 128 * self.mask_ratio
                 self.timem = self.target_length * self.mask_ratio
-            
+
         # group optimizer initialization with layer decay
         if self.model.norm is not None:
             for pn, p in self.model.norm.named_parameters():
                 if len(p.shape) == 1 or pn.endswith(".bias"):
-                    p.optim_overrides = {"optimizer": {"weight_decay_scale": 0}}
+                    p.optim_overrides = {
+                        "optimizer": {"weight_decay_scale": 0}
+                    }
 
         if self.fc_norm is not None:
             for pn, p in self.fc_norm.named_parameters():
                 if len(p.shape) == 1 or pn.endswith(".bias"):
-                    p.optim_overrides = {"optimizer": {"weight_decay_scale": 0}}
+                    p.optim_overrides = {
+                        "optimizer": {"weight_decay_scale": 0}
+                    }
 
         for pn, p in self.head.named_parameters():
             if len(p.shape) == 1 or pn.endswith(".bias"):
@@ -305,7 +380,9 @@ class MaeImageClassificationModel(BaseFairseqModel):
         if self.d2v_multi:
             mod_encs = list(model.modality_encoders.values())
             assert len(mod_encs) == 1, len(mod_encs)
-            blocks = list(mod_encs[0].context_encoder.blocks) + list(model.blocks)
+            blocks = list(mod_encs[0].context_encoder.blocks) + list(
+                model.blocks
+            )
         else:
             blocks = model.blocks
 
@@ -335,7 +412,9 @@ class MaeImageClassificationModel(BaseFairseqModel):
                             optim_override["optimizer"] = {}
 
                         if cfg.no_decay_blocks:
-                            optim_override["optimizer"]["lr_scale"] = layer_scales[lid]
+                            optim_override["optimizer"]["lr_scale"] = (
+                                layer_scales[lid]
+                            )
                             p.optim_overrides = optim_override
                         else:
                             optim_override["optimizer"] = {
@@ -352,13 +431,17 @@ class MaeImageClassificationModel(BaseFairseqModel):
                     optimizer_override_dict["weight_decay_scale"] = 0
 
                 if cfg.layer_decay > 0:
-                    optimizer_override_dict["lr_scale"] = layer_scales[layer_id]
+                    optimizer_override_dict["lr_scale"] = layer_scales[
+                        layer_id
+                    ]
                 p.optim_overrides = {"optimizer": optimizer_override_dict}
 
     @classmethod
     def build_model(cls, cfg: MaeImageClassificationConfig, task=FairseqTask):
         """Build a new model instance."""
-        assert hasattr(task, "labels"), f"Task {task} must have an attribute 'labels'"
+        assert hasattr(
+            task, "labels"
+        ), f"Task {task} must have an attribute 'labels'"
 
         return cls(cfg)
 
@@ -368,9 +451,9 @@ class MaeImageClassificationModel(BaseFairseqModel):
         label=None,
     ):
         labels = label
-        if self.training and self.mixup_fn is not None and labels is not None: 
+        if self.training and self.mixup_fn is not None and labels is not None:
             imgs, labels = self.mixup_fn(imgs, labels)
-            
+
         if self.training and self.specaug:
             imgs = self.spectrogram_augment(imgs)
 
@@ -388,13 +471,17 @@ class MaeImageClassificationModel(BaseFairseqModel):
         elif self.cfg.prediction_mode == PredictionMode.LIN_SOFTMAX:
             dtype = x.dtype
             x = F.logsigmoid(x.float())
-            x = torch.logsumexp(x + x, dim=1) - torch.logsumexp(x + 1e-6, dim=1)
+            x = torch.logsumexp(x + x, dim=1) - torch.logsumexp(
+                x + 1e-6, dim=1
+            )
             x = x.clamp(max=0)
             x = x - torch.log(-(torch.expm1(x)))
             x = torch.nan_to_num(x, nan=0, posinf=0, neginf=0)
             x = x.to(dtype=dtype)
         else:
-            raise Exception(f"unknown prediction mode {self.cfg.prediction_mode.name}")
+            raise Exception(
+                f"unknown prediction mode {self.cfg.prediction_mode.name}"
+            )
 
         # layer norm and project
         if self.fc_norm is not None:
@@ -404,24 +491,33 @@ class MaeImageClassificationModel(BaseFairseqModel):
 
         if labels is None:
             return x
-        
+
         x = torch.nan_to_num(x)
-        
+
         # logs for different downstream task    ESC-50 && SPC-2 -> single label    AS (AS2M,AS20K) -> multilabel
-        if not self.audio_mae or (self.audio_mae and (self.esc50_eval or self.spcv2_eval )):
-            if self.training and self.mixup_fn is not None and not self.spcv2_eval:
+        if not self.audio_mae or (
+            self.audio_mae
+            and (self.esc50_eval or self.spcv2_eval or self.yokogawa_eval)
+        ):
+            if (
+                self.training
+                and self.mixup_fn is not None
+                and not self.spcv2_eval
+            ):
                 loss = -labels * F.log_softmax(x.float(), dim=-1)
-                
+
             elif self.mixup_fn is not None and self.spcv2_eval:
                 loss = F.binary_cross_entropy_with_logits(
                     x, labels.float(), reduction="none"
                 )
-                
+
             else:
                 loss = F.cross_entropy(
                     x.float(),
                     labels,
-                    label_smoothing=self.cfg.label_smoothing if self.training else 0,
+                    label_smoothing=(
+                        self.cfg.label_smoothing if self.training else 0
+                    ),
                     reduction="none",
                 )
 
@@ -436,7 +532,7 @@ class MaeImageClassificationModel(BaseFairseqModel):
                     labels = labels.argmax(-1)
                     correct = (pred == labels).sum()
                     result["correct"] = correct
-                    
+
         else:
             loss = F.binary_cross_entropy_with_logits(
                 x, labels.float(), reduction="none"
@@ -450,9 +546,8 @@ class MaeImageClassificationModel(BaseFairseqModel):
             }
 
             if not self.training:
-                result["_predictions"] = torch.sigmoid(x) 
+                result["_predictions"] = torch.sigmoid(x)
                 result["_targets"] = labels
-
 
         return result
 
@@ -475,11 +570,17 @@ class MaeImageClassificationModel(BaseFairseqModel):
         return x
 
     # specaug
-    def spectrogram_augment(self,spec):
-        freq_masking = torchaudio.transforms.FrequencyMasking(self.freqm,iid_masks=True)
-        time_masking = torchaudio.transforms.TimeMasking(self.timem,iid_masks=True)
-        spec_ = spec.transpose(2,3)
+    def spectrogram_augment(self, spec):
+        freq_masking = torchaudio.transforms.FrequencyMasking(
+            self.freqm, iid_masks=True
+        )
+        time_masking = torchaudio.transforms.TimeMasking(
+            self.timem, iid_masks=True
+        )
+        spec_ = spec.transpose(2, 3)
         input_with_freq_mask = freq_masking(spec_)
         input_with_time_freq_mask = time_masking(input_with_freq_mask)
-        input_with_time_freq_mask = torch.transpose(input_with_time_freq_mask, 2, 3)
+        input_with_time_freq_mask = torch.transpose(
+            input_with_time_freq_mask, 2, 3
+        )
         return input_with_time_freq_mask

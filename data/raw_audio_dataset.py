@@ -4,30 +4,33 @@
 # LICENSE file in the root directory of this source tree.
 
 
+import io
 import logging
 import os
 import sys
 import time
-import io
-import h5py
 
+import h5py
 import numpy as np
 import torch
 import torch.nn.functional as F
 import torchaudio
 
 from fairseq.data import FairseqDataset
-from ..utils.data_utils import compute_block_mask_1d, get_buckets, get_bucketed_sizes
 from fairseq.data.audio.audio_utils import (
+    is_sf_audio_data,
     parse_path,
     read_from_stored_zip,
-    is_sf_audio_data,
 )
-from fairseq.data.text_compressor import TextCompressor, TextCompressionLevel
+from fairseq.data.text_compressor import TextCompressionLevel, TextCompressor
 
+from ..utils.data_utils import (
+    compute_block_mask_1d,
+    get_bucketed_sizes,
+    get_buckets,
+)
 
 logger = logging.getLogger(__name__)
-
 
 
 class RawAudioDataset(FairseqDataset):
@@ -85,29 +88,30 @@ class RawAudioDataset(FairseqDataset):
         return len(self.sizes)
 
     def _roll_mag_aug(self, waveform):
-        waveform=waveform.numpy()
-        idx=np.random.randint(len(waveform))
-        rolled_waveform=np.roll(waveform,idx)
+        waveform = waveform.numpy()
+        idx = np.random.randint(len(waveform))
+        rolled_waveform = np.roll(waveform, idx)
         mag = np.random.beta(10, 10) + 0.5
-        return torch.Tensor(rolled_waveform*mag)
+        return torch.Tensor(rolled_waveform * mag)
 
-
-    def postprocess(self, feats, curr_sample_rate, roll_aug = False):
+    def postprocess(self, feats, curr_sample_rate, roll_aug=False):
         if feats.dim() == 2:
             feats = feats.mean(-1)
 
         if curr_sample_rate != self.sample_rate:
-            raise Exception(f"sample rate: {curr_sample_rate}, need {self.sample_rate}")
+            raise Exception(
+                f"sample rate: {curr_sample_rate}, need {self.sample_rate}"
+            )
 
         assert feats.dim() == 1, feats.dim()
         # if self.normalize:
         #     with torch.no_grad():
         #         feats = F.layer_norm(feats, feats.shape)
         feats = feats - feats.mean()
-        
+
         if roll_aug:
             feats = self._roll_mag_aug(feats)
-        
+
         return feats
 
     def crop_to_max_size(self, t, target_size, dim=0):
@@ -145,7 +149,9 @@ class RawAudioDataset(FairseqDataset):
 
         collated_sources = sources[0].new_zeros(len(sources), target_size)
         padding_mask = (
-            torch.BoolTensor(collated_sources.shape).fill_(False) if self.pad else None
+            torch.BoolTensor(collated_sources.shape).fill_(False)
+            if self.pad
+            else None
         )
         for i, (source, size) in enumerate(zip(sources, sizes)):
             diff = size - target_size
@@ -158,7 +164,9 @@ class RawAudioDataset(FairseqDataset):
                 )
                 padding_mask[i, diff:] = True
             else:
-                collated_sources[i] = self.crop_to_max_size(source, target_size)
+                collated_sources[i] = self.crop_to_max_size(
+                    source, target_size
+                )
 
         input = {"source": collated_sources}
         if self.corpus_key is not None:
@@ -172,14 +180,20 @@ class RawAudioDataset(FairseqDataset):
             bucket = max(self._bucketed_sizes[s["id"]] for s in samples)
             num_pad = bucket - collated_sources.size(-1)
             if num_pad:
-                input["source"] = self._bucket_tensor(collated_sources, num_pad, 0)
-                input["padding_mask"] = self._bucket_tensor(padding_mask, num_pad, True)
+                input["source"] = self._bucket_tensor(
+                    collated_sources, num_pad, 0
+                )
+                input["padding_mask"] = self._bucket_tensor(
+                    padding_mask, num_pad, True
+                )
 
         if "precomputed_mask" in samples[0]:
             target_size = self._get_mask_indices_dims(target_size)
             collated_mask = torch.cat(
                 [
-                    self.crop_to_max_size(s["precomputed_mask"], target_size, dim=1)
+                    self.crop_to_max_size(
+                        s["precomputed_mask"], target_size, dim=1
+                    )
                     for s in samples
                 ],
                 dim=0,
@@ -192,7 +206,7 @@ class RawAudioDataset(FairseqDataset):
     def _get_mask_indices_dims(self, size, padding=0, dilation=1):
         if size not in self.feature_encoder_spec:
             L_in = size
-            for (_, kernel_size, stride) in self.feature_encoder_spec:
+            for _, kernel_size, stride in self.feature_encoder_spec:
                 L_out = L_in + 2 * padding - dilation * (kernel_size - 1) - 1
                 L_out = 1 + L_out // stride
                 L_in = L_out
@@ -267,9 +281,10 @@ class FileAudioDataset(RawAudioDataset):
         target_length=1024,
         esc50_eval=False,
         spcv2_eval=False,
+        yokogawa_eval=False,
         roll_mag_aug=False,
         noise=False,
-        train_mode='train',
+        train_mode="train",
         **mask_compute_kwargs,
     ):
         super().__init__(
@@ -290,6 +305,7 @@ class FileAudioDataset(RawAudioDataset):
         self.target_length = target_length
         self.esc50_eval = esc50_eval
         self.spcv2_eval = spcv2_eval
+        self.yokogawa_eval = yokogawa_eval
         self.roll_mag_aug = roll_mag_aug
         self.noise = noise
         self.train_mode = train_mode
@@ -299,7 +315,7 @@ class FileAudioDataset(RawAudioDataset):
         sizes = []
         self.skipped_indices = set()
 
-        # exclude data not in sample rate range     10.h5/****.wav  320000 
+        # exclude data not in sample rate range     10.h5/****.wav  320000
         with open(manifest_path, "r") as f:
             self.root_dir = f.readline().strip()
             for i, line in enumerate(f):
@@ -318,11 +334,14 @@ class FileAudioDataset(RawAudioDataset):
             task_dataset = "ESC-50"
         elif self.spcv2_eval:
             task_dataset = "SPC-2"
+        elif self.yokogawa_eval:
+            task_dataset = "Yokogawa"
         else:
             task_dataset = "AS"
-        
+
         logger.info(
-            f"sample rate: 16000\t"
+            # f"sample rate: 16000\t"
+            f"downsampling to 16k: {self.downsr_16hz}"
             f"target length: {self.target_length}\t"
             f"current task: {task_dataset}\t"
         )
@@ -353,7 +372,9 @@ class FileAudioDataset(RawAudioDataset):
         path_or_fp = os.path.join(self.root_dir, fn)
         _path, slice_ptr = parse_path(path_or_fp)
         if len(slice_ptr) == 2:
-            byte_data = read_from_stored_zip(_path, slice_ptr[0], slice_ptr[1])   # root/10.h5/***.wav
+            byte_data = read_from_stored_zip(
+                _path, slice_ptr[0], slice_ptr[1]
+            )  # root/10.h5/***.wav
             assert is_sf_audio_data(byte_data)
             path_or_fp = io.BytesIO(byte_data)
 
@@ -361,15 +382,17 @@ class FileAudioDataset(RawAudioDataset):
         wav = None
         for i in range(retry):
             try:
-                if self.h5_format and self.train_mode == 'train':
+                if self.h5_format and self.train_mode == "train":
                     parts = path_or_fp.split("/")
                     path_or_fp = "/".join(parts[:-1])
-                    path_or_fp = h5py.File(path_or_fp,'r')
+                    path_or_fp = h5py.File(path_or_fp, "r")
                     wav = path_or_fp[parts[-1]][:]
                     curr_sample_rate = 32000
-                    break                    
+                    break
                 else:
-                    wav, curr_sample_rate = sf.read(path_or_fp, dtype="float32")
+                    wav, curr_sample_rate = sf.read(
+                        path_or_fp, dtype="float32"
+                    )
                     break
             except Exception as e:
                 logger.warning(
@@ -384,51 +407,67 @@ class FileAudioDataset(RawAudioDataset):
             feats = torch.tensor(wav).float()
         else:
             feats = torch.from_numpy(wav).float()
-            
+
         if self.downsr_16hz:
-            feats = torchaudio.functional.resample(feats, orig_freq=curr_sample_rate, new_freq=16000)
+            feats = torchaudio.functional.resample(
+                feats, orig_freq=curr_sample_rate, new_freq=16000
+            )
             curr_sample_rate = 16000
             self.sample_rate = curr_sample_rate
-            
+
         # whether to use roll augmentation on waveform
-        use_roll = self.roll_mag_aug and self.train_mode == 'train'
-        
+        use_roll = self.roll_mag_aug and self.train_mode == "train"
+
         feats = self.postprocess(feats, curr_sample_rate, use_roll)
 
         # convert waveform to spectrogram
         if self.wav2fbank:
             feats = feats.unsqueeze(dim=0)
-            feats = torchaudio.compliance.kaldi.fbank(feats, htk_compat=True, sample_frequency=curr_sample_rate, use_energy=False,
-                                                  window_type='hanning', num_mel_bins=128, dither=0.0, frame_shift=10).unsqueeze(dim=0)
-            
-            # padding 
+            feats = torchaudio.compliance.kaldi.fbank(
+                feats,
+                htk_compat=True,
+                sample_frequency=curr_sample_rate,
+                use_energy=False,
+                window_type="hanning",
+                num_mel_bins=128,
+                dither=0.0,
+                frame_shift=10,
+            ).unsqueeze(dim=0)
+
+            # padding
             n_frames = feats.shape[1]
             diff = self.target_length - n_frames
             if diff > 0:
-                m = torch.nn.ZeroPad2d((0, 0, 0, diff)) 
+                m = torch.nn.ZeroPad2d((0, 0, 0, diff))
                 feats = m(feats)
-                
+
             elif diff < 0:
-                feats = feats[:,0:self.target_length,:]     
-                
+                feats = feats[:, 0 : self.target_length, :]
+
             # global normalization for AS
-            self.norm_mean = -4.268 
+            self.norm_mean = -4.268
             self.norm_std = 4.569
-            
+
             # global normalization for ESC-50
             if self.esc50_eval:
                 self.norm_mean = -6.627
                 self.norm_std = 5.359
-                
+
             # global normalization for spcv2
             if self.spcv2_eval:
                 self.norm_mean = -6.846
                 self.norm_std = 5.565
-                
-            feats = (feats - self.norm_mean) / (self.norm_std * 2) 
-            
-            if self.noise and self.train_mode == 'train': 
-                feats = feats + torch.rand(feats.shape[1], feats.shape[2]) * np.random.rand() / 10
+
+            # feats = (feats - self.norm_mean) / (self.norm_std * 2)
+            feats = (feats - feats.mean()) / (feats.std() * 2)
+
+            if self.noise and self.train_mode == "train":
+                feats = (
+                    feats
+                    + torch.rand(feats.shape[1], feats.shape[2])
+                    * np.random.rand()
+                    / 10
+                )
                 feats = torch.roll(feats, np.random.randint(-10, 10), 1)
 
         v = {"id": index, "source": feats}

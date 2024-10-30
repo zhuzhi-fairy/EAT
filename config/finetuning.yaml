@@ -31,6 +31,7 @@ task:
   spcv1_finetune: false
   spcv2_eval: false
   esc50_eval: false
+  yokogawa_eval: false
 
 
 dataset:
@@ -86,6 +87,7 @@ model:
 
   spcv2_eval: false
   esc50_eval: false
+  yokogawa_eval: false
   target_length: 1024
 
   label_smoothing: 0.0

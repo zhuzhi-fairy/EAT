@@ -4,19 +4,20 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from functools import partial
 import logging
+import os
 import random
 import time
+from functools import partial
+from shutil import copyfile
+
 import numpy as np
-import os
 import torch
 
 from fairseq.data import FairseqDataset
+
 from ..utils.data_utils import compute_block_mask_1d, compute_block_mask_2d
 from .raw_audio_dataset import FileAudioDataset
-
-from shutil import copyfile
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +41,12 @@ def load(path, loader, cache):
         except Exception as e:
             logger.warning(str(e))
             if "Errno 13" in str(e):
-                caching_loader.cache_root = f"/scratch/{random.randint(0, 69420)}"
-                logger.warning(f"setting cache root to {caching_loader.cache_root}")
+                caching_loader.cache_root = (
+                    f"/scratch/{random.randint(0, 69420)}"
+                )
+                logger.warning(
+                    f"setting cache root to {caching_loader.cache_root}"
+                )
                 cached_path = caching_loader.cache_root + path
             if curr_try == (num_tries - 1):
                 raise
@@ -71,6 +76,7 @@ class MaeImageDataset(FairseqDataset):
         shuffle=True,
         key="imgs",
         compute_mask=False,
+        sampling_rate: int = 48000,
         patch_size: int = 16,
         mask_prob: float = 0.75,
         mask_prob_adjust: float = 0,
@@ -81,20 +87,21 @@ class MaeImageDataset(FairseqDataset):
         non_overlapping: bool = False,
         require_same_masks: bool = True,
         clone_batch: int = 1,
-        audio_mae:bool = False,
-        h5_format:bool = False,
-        downsr_16hz:bool = False,
-        target_length:int = 1024,
-        esc50_eval:bool = False,
-        spcv2_eval:bool = False,
+        audio_mae: bool = False,
+        h5_format: bool = False,
+        downsr_16hz: bool = False,
+        target_length: int = 1024,
+        esc50_eval: bool = False,
+        spcv2_eval: bool = False,
+        yokogawa_eval: bool = False,
         roll_aug: bool = False,
         noise: bool = False,
         dataset_type: str = "imagefolder",
-        num_samples: int = 200000,       
-        replacement:  bool = False,
+        num_samples: int = 200000,
+        replacement: bool = False,
         AS2M_finetune: bool = False,
-        spcv1_finetune: bool =False,
-        weights_file: str="",
+        spcv1_finetune: bool = False,
+        weights_file: str = "",
         flexible_mask: bool = False,
     ):
         FairseqDataset.__init__(self)
@@ -103,17 +110,19 @@ class MaeImageDataset(FairseqDataset):
         self.key = key
         self.audio_mae = audio_mae
         if self.audio_mae:
+            self.sampling_rate = sampling_rate
             self.h5_format = h5_format
             self.downsr_16hz = downsr_16hz
             self.target_length = target_length
             self.esc50_eval = esc50_eval
             self.spcv2_eval = spcv2_eval
+            self.yokogawa_eval = yokogawa_eval
             self.noise = noise
             self.num_samples = num_samples
             self.replacement = replacement
             self.split = split
             self.AS2M_finetune = AS2M_finetune
-            self.spcv1_finetune= spcv1_finetune
+            self.spcv1_finetune = spcv1_finetune
             self.weights_file = weights_file
             self.flexible_mask = flexible_mask
 
@@ -125,46 +134,51 @@ class MaeImageDataset(FairseqDataset):
         # load wav files
         mask_args = {}
         if self.audio_mae:
-            min_sample_size = 10000 
-            
-            input_size = (self.target_length,128)
-            manifest_path = os.path.join(root, "{}.tsv".format(split))     
+            min_sample_size = 10000
+
+            input_size = (self.target_length, 128)
+            manifest_path = os.path.join(root, "{}.tsv".format(split))
             self.dataset = FileAudioDataset(
-                    manifest_path=manifest_path,
-                    sample_rate=32000,
-                    max_sample_size=325000,
-                    min_sample_size=min_sample_size,
-                    pad=False,
-                    normalize=True,
-                    num_buckets=0,
-                    compute_mask=False,
-                    h5_format=self.h5_format,
-                    downsr_16hz=self.downsr_16hz,
-                    wav2fbank=True,
-                    target_length=self.target_length,
-                    esc50_eval=self.esc50_eval,
-                    spcv2_eval=self.spcv2_eval,
-                    roll_mag_aug=self.roll_aug,
-                    train_mode=split,
-                    noise=self.noise,
-                    **mask_args,
-                )
+                manifest_path=manifest_path,
+                sample_rate=sampling_rate,
+                max_sample_size=325000,
+                min_sample_size=min_sample_size,
+                pad=False,
+                normalize=True,
+                num_buckets=0,
+                compute_mask=False,
+                h5_format=self.h5_format,
+                downsr_16hz=self.downsr_16hz,
+                wav2fbank=True,
+                target_length=self.target_length,
+                esc50_eval=self.esc50_eval,
+                spcv2_eval=self.spcv2_eval,
+                yokogawa_eval=self.yokogawa_eval,
+                roll_mag_aug=self.roll_aug,
+                train_mode=split,
+                noise=self.noise,
+                **mask_args,
+            )
             self.skipped_indices = self.dataset.skipped_indices
-            
+
         else:
             raise Exception(f"invalid dataset type {dataset_type}")
-        
-            
+
         logger.info(f"loaded {len(self.dataset)} examples")
 
         self.is_compute_mask = compute_mask
-        
+
         if type(input_size) == tuple:
-            self.patches = (input_size[0] // patch_size ) * ( input_size[1] // patch_size )
-            self.img_shape = (input_size[0] // patch_size,input_size[1] // patch_size )
-            
+            self.patches = (input_size[0] // patch_size) * (
+                input_size[1] // patch_size
+            )
+            self.img_shape = (
+                input_size[0] // patch_size,
+                input_size[1] // patch_size,
+            )
+
         else:
-            self.patches = (input_size // patch_size) ** 2  
+            self.patches = (input_size // patch_size) ** 2
         self.mask_prob = mask_prob
         self.mask_prob_adjust = mask_prob_adjust
         self.mask_length = mask_length
@@ -177,7 +191,7 @@ class MaeImageDataset(FairseqDataset):
 
     def __getitem__(self, index):
         if self.audio_mae:
-            img = self.dataset[index]['source']
+            img = self.dataset[index]["source"]
         else:
             img, _ = self.dataset[index]
 
@@ -200,7 +214,7 @@ class MaeImageDataset(FairseqDataset):
                     require_same_masks=True,
                 )
             else:
-                mask = compute_block_mask_2d(           
+                mask = compute_block_mask_2d(
                     shape=(self.clone_batch, self.patches),
                     mask_prob=self.mask_prob,
                     mask_length=self.mask_length,
@@ -211,11 +225,13 @@ class MaeImageDataset(FairseqDataset):
                     mask_dropout=self.mask_dropout,
                     non_overlapping=self.non_overlapping,
                     img_shape=self.img_shape,
-                    flexible_mask=self.flexible_mask
+                    flexible_mask=self.flexible_mask,
                 )
 
                 if mask.shape[1] < self.patches:
-                    padding = torch.zeros((mask.shape[0], self.patches - mask.shape[1]))
+                    padding = torch.zeros(
+                        (mask.shape[0], self.patches - mask.shape[1])
+                    )
                     mask = torch.cat((mask, padding), dim=1)
 
             v["precomputed_mask"] = mask
@@ -239,11 +255,15 @@ class MaeImageDataset(FairseqDataset):
         }
 
         if "target" in samples[0]:
-            collated_target = torch.stack([s["target"] for s in samples], dim=0)
+            collated_target = torch.stack(
+                [s["target"] for s in samples], dim=0
+            )
             res["net_input"]["target"] = collated_target
 
         if "precomputed_mask" in samples[0]:
-            collated_mask = torch.cat([s["precomputed_mask"] for s in samples], dim=0)
+            collated_mask = torch.cat(
+                [s["precomputed_mask"] for s in samples], dim=0
+            )
             res["net_input"]["precomputed_mask"] = collated_mask
 
         return res
@@ -262,22 +282,27 @@ class MaeImageDataset(FairseqDataset):
     def ordered_indices(self):
         """Return an ordered list of indices. Batches will be constructed based
         on this order."""
-        if self.shuffle and (self.AS2M_finetune or self.spcv1_finetune) and self.split == "train" :
+        if (
+            self.shuffle
+            and (self.AS2M_finetune or self.spcv1_finetune)
+            and self.split == "train"
+        ):
             weights = np.loadtxt(self.weights_file)
             normalized_weights = weights / np.sum(weights)
             weights_tensor = torch.from_numpy(normalized_weights)
 
-            subsample_balanced_indicies = torch.multinomial(weights_tensor, self.num_samples, self.replacement)
+            subsample_balanced_indicies = torch.multinomial(
+                weights_tensor, self.num_samples, self.replacement
+            )
             order = subsample_balanced_indicies.numpy()
 
             # order = [np.random.choice(order[0], size=len(self), replace=True, p=weights)]
             return order
-        
+
         elif self.shuffle and self.split == "train":
             order = [np.random.permutation(len(self))]
             return order[0]
 
-            
         else:
             order = [np.arange(len(self))]
             return order[0]

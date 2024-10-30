@@ -6,30 +6,33 @@
 # can be found in the PATENTS file in the same directory.
 
 import logging
-import sys
-import torch
-import numpy as np
 import os
-
-
-from typing import Optional
+import sys
 from dataclasses import dataclass, field
-from omegaconf import MISSING
+from typing import Optional
 
-from fairseq.tasks import register_task
-from fairseq.logging import metrics
+import numpy as np
+import torch
+from omegaconf import MISSING
 from sklearn import metrics as sklearn_metrics
-from .pretraining_AS2M import MaeImagePretrainingTask,MaeImagePretrainingConfig
+
+from fairseq.logging import metrics
+from fairseq.tasks import register_task
 
 from ..data.add_class_target_dataset import AddClassTargetDataset
-
+from .pretraining_AS2M import (
+    MaeImagePretrainingConfig,
+    MaeImagePretrainingTask,
+)
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class MaeImageClassificationConfig(MaeImagePretrainingConfig):
-    data: str = field(default=MISSING, metadata={"help": "path to data directory"})
+    data: str = field(
+        default=MISSING, metadata={"help": "path to data directory"}
+    )
     input_size: int = 224
     local_cache_path: Optional[str] = None
 
@@ -38,12 +41,14 @@ class MaeImageClassificationConfig(MaeImagePretrainingConfig):
     labels: str = "lbl"
 
 
-@register_task("mae_image_classification", dataclass=MaeImageClassificationConfig)
+@register_task(
+    "mae_image_classification", dataclass=MaeImageClassificationConfig
+)
 class MaeImageClassificationTask(MaeImagePretrainingTask):
     """ """
 
     cfg: MaeImageClassificationConfig
-    
+
     def __init__(
         self,
         cfg: MaeImageClassificationConfig,
@@ -51,7 +56,7 @@ class MaeImageClassificationTask(MaeImagePretrainingTask):
         super().__init__(cfg)
 
         self.state.add_factory("labels", self.load_labels)
-        
+
     def load_labels(self):
         labels = {}
         path = os.path.join(self.cfg.data, self.cfg.label_descriptors)
@@ -70,7 +75,6 @@ class MaeImageClassificationTask(MaeImagePretrainingTask):
     def labels(self):
         return self.state.labels
 
-
     @classmethod
     def setup_task(cls, cfg: MaeImageClassificationConfig, **kwargs):
         """Setup the task (e.g., load dictionaries).
@@ -81,21 +85,30 @@ class MaeImageClassificationTask(MaeImagePretrainingTask):
 
         return cls(cfg)
 
-    def load_dataset(self, split: str, task_cfg: MaeImageClassificationConfig = None, **kwargs):
+    def load_dataset(
+        self,
+        split: str,
+        task_cfg: MaeImageClassificationConfig = None,
+        **kwargs,
+    ):
         super().load_dataset(split, task_cfg, **kwargs)
-        
+
         data_path = self.cfg.data
         task_cfg = task_cfg or self.cfg
-                
+
         label_path = os.path.join(data_path, f"{split}.{task_cfg.labels}")
-        skipped_indices = getattr(self.datasets[split], "skipped_indices", set())
+        skipped_indices = getattr(
+            self.datasets[split], "skipped_indices", set()
+        )
         # print(self.datasets[split].skipped_indices)
         labels = []
         with open(label_path, "r") as f:
             for i, line in enumerate(f):
                 if i not in skipped_indices:
                     lbl_items = line.rstrip().split()
-                    labels.append([self.state.labels[x] for x in lbl_items[1].split(",")])
+                    labels.append(
+                        [self.state.labels[x] for x in lbl_items[1].split(",")]
+                    )
 
         assert len(labels) == len(self.datasets[split]), (
             f"labels length ({len(labels)}) and dataset length "
@@ -110,28 +123,39 @@ class MaeImageClassificationTask(MaeImagePretrainingTask):
             num_classes=len(self.labels),
         )
 
-    def build_model(self, model_cfg: MaeImageClassificationConfig, from_checkpoint=False):
+    def build_model(
+        self, model_cfg: MaeImageClassificationConfig, from_checkpoint=False
+    ):
         model = super().build_model(model_cfg, from_checkpoint)
 
         actualized_cfg = getattr(model, "cfg", None)
         if actualized_cfg is not None:
             if hasattr(actualized_cfg, "pretrained_model_args"):
-                model_cfg.pretrained_model_args = actualized_cfg.pretrained_model_args
+                model_cfg.pretrained_model_args = (
+                    actualized_cfg.pretrained_model_args
+                )
 
         return model
-    
+
     def calculate_stats(self, output, target):
 
         classes_num = target.shape[-1]
         stats = []
-        
-        if self.cfg.esc50_eval  or self.cfg.spcv2_eval or not self.cfg.audio_mae:
-            
+
+        if (
+            self.cfg.esc50_eval
+            or self.cfg.yokogawa_eval
+            or self.cfg.spcv2_eval
+            or not self.cfg.audio_mae
+        ):
+
             # Accuracy, only used for single-label classification such as esc-50, not for multiple label one such as AudioSet
-            accuracy = sklearn_metrics.accuracy_score(np.argmax(target, 1), np.argmax(output, 1)) 
+            accuracy = sklearn_metrics.accuracy_score(
+                np.argmax(target, 1), np.argmax(output, 1)
+            )
             dict = {"accuracy": accuracy}
             stats.append(dict)
-            
+
         # Class-wise statistics
         else:
             for k in range(classes_num):
@@ -143,15 +167,15 @@ class MaeImageClassificationTask(MaeImagePretrainingTask):
                 dict = {
                     "AP": avg_precision,
                 }
-                
+
                 stats.append(dict)
         return stats
-    
-    
-    def valid_step(self, sample, model, criterion):
-        loss, sample_size, logging_output = super().valid_step(sample, model, criterion)
-        return loss, sample_size, logging_output
 
+    def valid_step(self, sample, model, criterion):
+        loss, sample_size, logging_output = super().valid_step(
+            sample, model, criterion
+        )
+        return loss, sample_size, logging_output
 
     def reduce_metrics(self, logging_outputs, criterion):
         super().reduce_metrics(logging_outputs, criterion)
@@ -163,17 +187,23 @@ class MaeImageClassificationTask(MaeImagePretrainingTask):
 
             metrics.log_derived(
                 "accuracy",
-                lambda meters: 100 * meters["_correct"].sum / meters["sample_size"].sum,
+                lambda meters: 100
+                * meters["_correct"].sum
+                / meters["sample_size"].sum,
             )
-            
+
         elif "_predictions" in logging_outputs[0]:
             metrics.log_concat_tensor(
                 "_predictions",
-                torch.cat([l["_predictions"].cpu() for l in logging_outputs], dim=0),
+                torch.cat(
+                    [l["_predictions"].cpu() for l in logging_outputs], dim=0
+                ),
             )
             metrics.log_concat_tensor(
                 "_targets",
-                torch.cat([l["_targets"].cpu() for l in logging_outputs], dim=0),
+                torch.cat(
+                    [l["_targets"].cpu() for l in logging_outputs], dim=0
+                ),
             )
 
             def compute_stats(meters):
@@ -184,8 +214,7 @@ class MaeImageClassificationTask(MaeImagePretrainingTask):
                 )
                 return np.nanmean([stat["AP"] for stat in stats])
 
-            metrics.log_derived("mAP", compute_stats)            
-
+            metrics.log_derived("mAP", compute_stats)
 
     @property
     def source_dictionary(self):
